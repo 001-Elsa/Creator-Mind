@@ -101,3 +101,15 @@ state = execute_workflow(
 ```
 
 当前 `execute_workflow()` 为同步函数。接入时由 API/任务模块负责调用它，并将返回的 `CreationState` 映射到自己的响应或任务状态接口。对话模块可将有限历史作为 `context` 传给分类器；会话历史的读取和保存由对话模块负责。
+
+## 意图评测与阈值扫描
+
+`backend/tests/data/intent_eval.jsonl` 包含 30 条手工标注的中文样例，每种意图各 5 条。它用于初步比较分类路由、澄清率和槽位抽取表现，不代表已经校准完成的通用基准。
+
+在 `backend` 目录配置好 `CREATORMIND_LLM_BASE_URL`、`CREATORMIND_LLM_MODEL` 和可选的 `CREATORMIND_LLM_API_KEY` 后运行：
+
+```powershell
+python -m app.agents.evaluation
+```
+
+命令对每条样例调用一次模型，再在本地扫描 `0.00` 到 `1.00` 的置信度阈值，并输出准确率、Macro-F1、澄清率和已标注槽位精确匹配率。可用 `--thresholds 0.50,0.60,0.65,0.70` 指定候选阈值。阈值建议依据 Macro-F1 选择，平分时优先靠近当前值 `0.65`；脚本只给建议，不自动修改生产配置。每次评测会发起 30 次模型请求，阈值扫描不会重复调用模型。

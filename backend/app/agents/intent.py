@@ -67,6 +67,19 @@ slots 仅允许 topic、format、audience、length、source_ids、draft_id、ins
 并提出简短问题。
 修改草稿时区分草稿标识与修改要求；核查时将待核查内容放入 text。不要声称已检索、写作、核查或保存。"""
 
+REQUIRED_INTENT_SLOTS: dict[Intent, tuple[str, ...]] = {
+    Intent.CREATE_CONTENT: ("topic",),
+    Intent.REVISE_DRAFT: ("draft_id", "instruction"),
+    Intent.FACT_CHECK: ("text",),
+}
+
+SLOT_QUESTIONS = {
+    "topic": "你想创作什么主题的内容？",
+    "draft_id": "请提供要修改的草稿。",
+    "instruction": "你希望如何修改这份草稿？",
+    "text": "请提供需要核查的文本或事实主张。",
+}
+
 
 def _content_from_response(payload: dict[str, Any]) -> str:
     try:
@@ -78,13 +91,13 @@ def _content_from_response(payload: dict[str, Any]) -> str:
     return content
 
 
-def classify_intent(
+def classify_intent_candidate(
     user_input: str,
     context: str | None = None,
     *,
     client: httpx.Client | None = None,
 ) -> IntentResult:
-    """Classify one user message through the configured OpenAI-compatible endpoint."""
+    """Return the validated model prediction before local clarification policy is applied."""
     if not user_input.strip():
         return IntentResult(
             intent=Intent.CLARIFY,
@@ -126,14 +139,46 @@ def classify_intent(
     except (ValidationError, IntentClassificationError) as exc:
         raise IntentClassificationError("模型未返回符合约定的意图 JSON") from exc
 
-    if result.confidence < INTENT_CLARIFICATION_THRESHOLD:
-        result.intent = Intent.CLARIFY
-        result.clarification_question = result.clarification_question or (
+    return result
+
+
+def apply_intent_policy(
+    result: IntentResult,
+    *,
+    threshold: float = INTENT_CLARIFICATION_THRESHOLD,
+) -> IntentResult:
+    """Apply the same confidence and required-slot rules used by production routing."""
+    normalized = result.model_copy(deep=True)
+    if normalized.confidence < threshold:
+        normalized.intent = Intent.CLARIFY
+        normalized.clarification_question = normalized.clarification_question or (
             "我还不确定你的需求，可以再具体说明一下吗？"
         )
-    if result.intent == Intent.CREATE_CONTENT and not result.slots.topic:
-        result.missing_fields = list(dict.fromkeys([*result.missing_fields, "topic"]))
-        result.clarification_question = result.clarification_question or "你想创作什么主题的内容？"
-    if result.missing_fields and not result.clarification_question:
-        result.clarification_question = "请补充完成这项操作所需的信息。"
-    return result
+
+    required_slots = REQUIRED_INTENT_SLOTS.get(normalized.intent, ())
+    missing_required = [
+        slot
+        for slot in required_slots
+        if not getattr(normalized.slots, slot)
+    ]
+    if missing_required:
+        normalized.missing_fields = list(
+            dict.fromkeys([*normalized.missing_fields, *missing_required])
+        )
+        normalized.clarification_question = normalized.clarification_question or SLOT_QUESTIONS[
+            missing_required[0]
+        ]
+    if normalized.missing_fields and not normalized.clarification_question:
+        normalized.clarification_question = "请补充完成这项操作所需的信息。"
+    return normalized
+
+
+def classify_intent(
+    user_input: str,
+    context: str | None = None,
+    *,
+    client: httpx.Client | None = None,
+) -> IntentResult:
+    """Classify a user message and apply the production clarification policy."""
+    candidate = classify_intent_candidate(user_input, context, client=client)
+    return apply_intent_policy(candidate)
